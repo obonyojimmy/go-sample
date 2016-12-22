@@ -1,84 +1,93 @@
 package main
 
 import (
-    "fmt"
-    "syscall"
-    "unsafe"
-)
-
-func abort(funcname string, err error) {
-    panic(fmt.Sprintf("%s failed: %v", funcname, err))
-}
-
-var (
-    kernel32, _        = syscall.LoadLibrary("kernel32.dll")
-    getModuleHandle, _ = syscall.GetProcAddress(kernel32, "GetModuleHandleW")
-
-    user32, _     = syscall.LoadLibrary("user32.dll")
-    messageBox, _ = syscall.GetProcAddress(user32, "MessageBoxW")
+	"bytes"
+	"fmt"
+	"syscall"
+	"time"
+	"unsafe"
 )
 
 const (
-    MB_OK                = 0x00000000
-    MB_OKCANCEL          = 0x00000001
-    MB_ABORTRETRYIGNORE  = 0x00000002
-    MB_YESNOCANCEL       = 0x00000003
-    MB_YESNO             = 0x00000004
-    MB_RETRYCANCEL       = 0x00000005
-    MB_CANCELTRYCONTINUE = 0x00000006
-    MB_ICONHAND          = 0x00000010
-    MB_ICONQUESTION      = 0x00000020
-    MB_ICONEXCLAMATION   = 0x00000030
-    MB_ICONASTERISK      = 0x00000040
-    MB_USERICON          = 0x00000080
-    MB_ICONWARNING       = MB_ICONEXCLAMATION
-    MB_ICONERROR         = MB_ICONHAND
-    MB_ICONINFORMATION   = MB_ICONASTERISK
-    MB_ICONSTOP          = MB_ICONHAND
-
-    MB_DEFBUTTON1 = 0x00000000
-    MB_DEFBUTTON2 = 0x00000100
-    MB_DEFBUTTON3 = 0x00000200
-    MB_DEFBUTTON4 = 0x00000300
+	ModAlt = 1 << iota
+	ModCtrl
+	ModShift
+	ModWin
 )
 
-func MessageBox(caption, text string, style uintptr) (result int) {
-    var nargs uintptr = 4
-    ret, _, callErr := syscall.Syscall9(uintptr(messageBox),
-        nargs,
-        0,
-        uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(text))),
-        uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(caption))),
-        style,
-        0,
-        0,
-        0,
-        0,
-        0)
-    if callErr != 0 {
-        abort("Call MessageBox", callErr)
-    }
-    result = int(ret)
-    return
+type Hotkey struct {
+	Id        int // Unique id
+	Modifiers int // Mask of modifiers
+	KeyCode   int // Key code, e.g. 'A'
 }
 
-func GetModuleHandle() (handle uintptr) {
-    var nargs uintptr = 0
-    if ret, _, callErr := syscall.Syscall(uintptr(getModuleHandle), nargs, 0, 0, 0); callErr != 0 {
-        abort("Call GetModuleHandle", callErr)
-    } else {
-        handle = ret
-    }
-    return
+// String returns a human-friendly display name of the hotkey
+// such as "Hotkey[Id: 1, Alt+Ctrl+O]"
+func (h *Hotkey) String() string {
+	mod := &bytes.Buffer{}
+	if h.Modifiers&ModAlt != 0 {
+		mod.WriteString("Alt+")
+	}
+	if h.Modifiers&ModCtrl != 0 {
+		mod.WriteString("Ctrl+")
+	}
+	if h.Modifiers&ModShift != 0 {
+		mod.WriteString("Shift+")
+	}
+	if h.Modifiers&ModWin != 0 {
+		mod.WriteString("Win+")
+	}
+	return fmt.Sprintf("Hotkey[Id: %d, %s%c]", h.Id, mod, h.KeyCode)
 }
 
 func main() {
-    defer syscall.FreeLibrary(kernel32)
-    defer syscall.FreeLibrary(user32)
+	user32 := syscall.MustLoadDLL("user32")
+	defer user32.Release()
 
-    fmt.Printf("Return: %d\n", MessageBox("Done Title", "This test is Done.", MB_YESNOCANCEL))
+	reghotkey := user32.MustFindProc("RegisterHotKey")
+
+	// Hotkeys to listen to:
+	keys := map[int16]*Hotkey{
+		1: &Hotkey{1, ModAlt + ModCtrl, 'O'},  // ALT+CTRL+O
+		2: &Hotkey{2, ModAlt + ModShift, 'M'}, // ALT+SHIFT+M
+		3: &Hotkey{3, ModAlt + ModCtrl, 'X'},  // ALT+CTRL+X
+	}
+
+	// Register hotkeys:
+	for _, v := range keys {
+		r1, _, err := reghotkey.Call(
+			0, uintptr(v.Id), uintptr(v.Modifiers), uintptr(v.KeyCode))
+		if r1 == 1 {
+			fmt.Println("Registered", v)
+		} else {
+			fmt.Println("Failed to register", v, ", error:", err)
+		}
+	}
+
+	peekmsg := user32.MustFindProc("PeekMessageW")
+
+	for {
+		var msg = &MSG{}
+		peekmsg.Call(uintptr(unsafe.Pointer(msg)), 0, 0, 0, 1)
+
+		// Registered id is in the WPARAM field:
+		if id := msg.WPARAM; id != 0 {
+			fmt.Println("Hotkey pressed:", keys[id])
+			if id == 3 { // CTRL+ALT+X = Exit
+				fmt.Println("CTRL+ALT+X pressed, goodbye...")
+				return
+			}
+		}
+
+		time.Sleep(time.Millisecond * 50)
+	}
 }
 
-func init() {
-    fmt.Print("Starting Up\n")
+type MSG struct {
+	HWND   uintptr
+	UINT   uintptr
+	WPARAM int16
+	LPARAM int64
+	DWORD  int32
+	POINT  struct{ X, Y int64 }
 }
